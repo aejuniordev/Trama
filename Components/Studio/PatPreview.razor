@@ -1,0 +1,122 @@
+@implements IDisposable
+
+@{
+    EnsureRendered();
+}
+
+<section class="panel preview-panel" aria-label="Pré-visualização">
+    <header class="panel-head">
+        <h2 class="panel-title">Pré-visualização</h2>
+        <label class="zoom">
+            <span>Quadros</span>
+            <input type="range" min="1" max="16" step="1" value="@_tiles" @oninput="OnZoom" aria-label="Quantidade de quadros visíveis na largura" />
+            <output>@_tiles</output>
+        </label>
+        <label class="switch switch-small">
+            <input type="checkbox" checked="@_showTiles" @onchange="e => { _showTiles = (bool)e.Value!; }" />
+            <span class="switch-track" aria-hidden="true"></span>Limites
+        </label>
+    </header>
+
+    <div class="panel-body preview-body">
+        <svg class="preview-svg" viewBox="0 0 @VW @VH" preserveAspectRatio="xMidYMid slice"
+             role="img" aria-label="Padrão repetido">
+            @if (_showTiles)
+            {
+                <path class="tile-bounds" d="@_bounds" />
+                <rect class="tile-origin" x="@N(_origin.X)" y="@N(_origin.Y - _tileScreenH)" width="@N(_tileScreenW)" height="@N(_tileScreenH)" />
+            }
+            <path class="hatch" d="@_hatch" />
+            @if (_highlight.Length > 0)
+            {
+                <path class="hatch hatch-selected" d="@_highlight" />
+            }
+        </svg>
+
+        @if (_truncated)
+        {
+            <p class="preview-note">Linhas demais para exibir tudo. Diminua a quantidade de quadros.</p>
+        }
+        else if (State.PreviewLines.Count == 0)
+        {
+            <p class="preview-note is-empty">@(State.Doc.IsManual ? "Nenhuma linha válida no texto." : "Desenhe uma linha no quadro para ver o padrão repetido aqui.")</p>
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public EditorState State { get; set; } = default!;
+
+    private const int VW = 1000;
+    private const int VH = 640;
+    private const int MaxPrimitives = 60_000;
+
+    private int _tiles = 4;
+    private bool _showTiles = true;
+
+    private int _renderedVersion = -1;
+    private int _renderedTiles = -1;
+    private Guid? _renderedSelection;
+
+    private string _hatch = "";
+    private string _highlight = "";
+    private string _bounds = "";
+    private bool _truncated;
+    private Vec _origin;
+    private double _tileScreenW, _tileScreenH;
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    private void OnZoom(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var n)) _tiles = Math.Clamp(n, 1, 16);
+    }
+
+    private void EnsureRendered()
+    {
+        if (State.Version == _renderedVersion && _tiles == _renderedTiles && State.SelectedId == _renderedSelection) return;
+        _renderedVersion = State.Version;
+        _renderedTiles = _tiles;
+        _renderedSelection = State.SelectedId;
+
+        var doc = State.Doc;
+        double w = doc.TileWidth > 0 ? doc.TileWidth : 1;
+        double h = doc.TileHeight > 0 ? doc.TileHeight : 1;
+
+        var spanX = _tiles * w;
+        var scale = VW / spanX;
+        var spanY = VH / scale;
+        var vp = new Viewport(-spanX / 2, -spanY / 2, spanX / 2, spanY / 2);
+        Vec ToScreen(Vec p) => new((p.X - vp.MinX) * scale, (vp.MaxY - p.Y) * scale);
+
+        var selected = State.SelectedLine;
+        var others = selected is null ? State.PreviewLines : State.PreviewLines.Where(l => !ReferenceEquals(l, selected));
+
+        var main = PatRenderer.Render(others, vp, ToScreen, MaxPrimitives);
+        _hatch = main.PathData;
+        _truncated = main.Truncated;
+        _highlight = selected is null ? "" : PatRenderer.Render(new[] { selected }, vp, ToScreen, MaxPrimitives).PathData;
+
+        var sb = new System.Text.StringBuilder();
+        for (var k = Math.Ceiling(vp.MinX / w); k * w <= vp.MaxX; k++)
+        {
+            var x = ToScreen(new Vec(k * w, 0)).X;
+            sb.Append($"M{N(x)} 0V{VH}");
+        }
+        for (var k = Math.Ceiling(vp.MinY / h); k * h <= vp.MaxY; k++)
+        {
+            var y = ToScreen(new Vec(0, k * h)).Y;
+            sb.Append($"M0 {N(y)}H{VW}");
+        }
+        _bounds = sb.ToString();
+        _origin = ToScreen(new Vec(0, 0));
+        _tileScreenW = w * scale;
+        _tileScreenH = h * scale;
+    }
+
+    private static string N(double v) => PatFormat.Decimals(v, 2);
+
+    public void Dispose() => State.Changed -= OnChanged;
+}

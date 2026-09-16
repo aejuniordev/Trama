@@ -1,0 +1,591 @@
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+@{
+    ComputeLayout();
+    var doc = State.Doc;
+    var tileW = doc.TileWidth * _scale;
+    var tileH = doc.TileHeight * _scale;
+}
+
+<section class="panel canvas-panel" aria-label="Desenho">
+    <header class="panel-head">
+        <h2 class="panel-title">Desenho</h2>
+        <div class="toolgroup" role="toolbar" aria-label="Ferramentas de desenho">
+            <button type="button" class="tool @ToolClass(DrawTool.Select)" aria-pressed="@Pressed(DrawTool.Select)"
+                    title="Selecionar e mover (V)" @onclick="() => State.SetTool(DrawTool.Select)">
+                <Icon Name="cursor" /><span>Selecionar</span>
+            </button>
+            <button type="button" class="tool @ToolClass(DrawTool.Line)" aria-pressed="@Pressed(DrawTool.Line)"
+                    title="Desenhar linha (L)" @onclick="() => State.SetTool(DrawTool.Line)">
+                <Icon Name="line" /><span>Linha</span>
+            </button>
+            <button type="button" class="tool @ToolClass(DrawTool.Erase)" aria-pressed="@Pressed(DrawTool.Erase)"
+                    title="Apagar linhas (E)" @onclick="() => State.SetTool(DrawTool.Erase)">
+                <Icon Name="erase" /><span>Apagar</span>
+            </button>
+        </div>
+    </header>
+
+    <div class="toggles">
+        <label class="switch" title="Ao soltar, ajusta o ângulo para que a linha se repita sem arredondamento.">
+            <input type="checkbox" checked="@State.Options.AutoFix" @onchange="e => SetOption(o => o.AutoFix = (bool)e.Value!)" />
+            <span class="switch-track" aria-hidden="true"></span>Correção automática
+        </label>
+        <label class="switch" title="Trava na horizontal ou vertical. Segure Shift para usar pontualmente.">
+            <input type="checkbox" checked="@State.Options.Ortho" @onchange="e => SetOption(o => o.Ortho = (bool)e.Value!)" />
+            <span class="switch-track" aria-hidden="true"></span>Orto
+        </label>
+        <label class="switch" title="Encaixa as pontas nos cruzamentos da grade.">
+            <input type="checkbox" checked="@State.Options.GridSnap" @onchange="e => SetOption(o => o.GridSnap = (bool)e.Value!)" />
+            <span class="switch-track" aria-hidden="true"></span>Grade
+        </label>
+        <label class="switch" title="Encaixa nas pontas e nos pontos médios das outras linhas.">
+            <input type="checkbox" checked="@State.Options.LineSnap" @onchange="e => SetOption(o => o.LineSnap = (bool)e.Value!)" />
+            <span class="switch-track" aria-hidden="true"></span>Pontas
+        </label>
+    </div>
+
+    <div class="canvas-body">
+        <svg @ref="_svg" class="drafting tool-@State.Tool.ToString().ToLowerInvariant()"
+             viewBox="0 0 @N(_viewW) @N(_viewH)" preserveAspectRatio="xMidYMid meet"
+             role="img" aria-label="Quadro de repetição com @doc.Segments.Count linhas">
+
+            <rect class="sheet" x="@N(Pad)" y="@N(Pad)" width="@N(tileW)" height="@N(tileH)" />
+
+            @for (var i = 1; i < doc.GridDivisions; i++)
+            {
+                var gx = Pad + i * _stepX * _scale;
+                var gy = Pad + i * _stepY * _scale;
+                var major = IsMajor(i, doc.GridDivisions) ? "grid grid-major" : "grid";
+                <line class="@major" x1="@N(gx)" y1="@N(Pad)" x2="@N(gx)" y2="@N(Pad + tileH)" />
+                <line class="@major" x1="@N(Pad)" y1="@N(gy)" x2="@N(Pad + tileW)" y2="@N(gy)" />
+            }
+
+            <rect class="tile-border" x="@N(Pad)" y="@N(Pad)" width="@N(tileW)" height="@N(tileH)" />
+
+            <text class="dim" x="@N(Pad)" y="@N(Pad + tileH + 22)" text-anchor="middle">0</text>
+            <text class="dim" x="@N(Pad + tileW)" y="@N(Pad + tileH + 22)" text-anchor="middle">@PatFormat.Short(doc.TileWidth)</text>
+            <text class="dim" x="@N(Pad - 10)" y="@N(Pad + 4)" text-anchor="end">@PatFormat.Short(doc.TileHeight)</text>
+
+            @foreach (var s in doc.Segments)
+            {
+                var a = ToScreen(s.P1);
+                var b = ToScreen(s.P2);
+                <line class="seg @SegClass(s)" x1="@N(a.X)" y1="@N(a.Y)" x2="@N(b.X)" y2="@N(b.Y)" />
+            }
+
+            @if (!doc.IsManual && State.Selected is Segment sel)
+            {
+                var a = ToScreen(sel.P1);
+                var b = ToScreen(sel.P2);
+                <circle class="handle" cx="@N(a.X)" cy="@N(a.Y)" r="6" />
+                <circle class="handle" cx="@N(b.X)" cy="@N(b.Y)" r="6" />
+            }
+
+            @if (_drawStart is Vec start && _cursor is Vec end)
+            {
+                var a = ToScreen(start);
+                var b = ToScreen(end);
+                var d = end - start;
+                <line class="rubber" x1="@N(a.X)" y1="@N(a.Y)" x2="@N(b.X)" y2="@N(b.Y)" />
+                <circle class="snap-dot" cx="@N(a.X)" cy="@N(a.Y)" r="3.5" />
+                <circle class="snap-dot" cx="@N(b.X)" cy="@N(b.Y)" r="3.5" />
+                <g class="rubber-label-group">
+                    <text class="rubber-label" x="@N(Math.Min(b.X + 12, _viewW - 110))" y="@N(Math.Max(b.Y - 12, 16))">@($"{PatFormat.Short(d.Length)} {doc.UnitLabel}, {AngleOf(d)}°")</text>
+                </g>
+            }
+            else if (_hoverSnap is Vec hs && !doc.IsManual)
+            {
+                var p = ToScreen(hs);
+                <circle class="snap-dot is-hover" cx="@N(p.X)" cy="@N(p.Y)" r="3.5" />
+            }
+        </svg>
+
+        @if (doc.IsManual)
+        {
+            <div class="manual-overlay">
+                <p>Este padrão está em modo texto. As edições são feitas direto no arquivo .PAT.</p>
+                <button type="button" class="btn" @onclick="ReturnToDrawingAsync"><Icon Name="back" /> Voltar ao desenho</button>
+            </div>
+        }
+    </div>
+
+    <footer class="canvas-foot">
+        @if (!doc.IsManual && State.Selected is Segment selected)
+        {
+            var (status, message) = State.Generated.StatusFor(selected.Id);
+            <div class="seg-props" @key="selected.Id">
+                <span class="status-icon status-@status.ToString().ToLowerInvariant()" title="@(message ?? "Linha válida")">
+                    <Icon Name="@(status switch { LineStatus.Ok => "ok", LineStatus.Warning => "warn", _ => "error" })" />
+                </span>
+                <label class="coord">x₁<input type="number" step="any" value="@PatFormat.Short(selected.X1)" @onchange="e => SetCoord(selected, 0, e.Value)" /></label>
+                <label class="coord">y₁<input type="number" step="any" value="@PatFormat.Short(selected.Y1)" @onchange="e => SetCoord(selected, 1, e.Value)" /></label>
+                <label class="coord">x₂<input type="number" step="any" value="@PatFormat.Short(selected.X2)" @onchange="e => SetCoord(selected, 2, e.Value)" /></label>
+                <label class="coord">y₂<input type="number" step="any" value="@PatFormat.Short(selected.Y2)" @onchange="e => SetCoord(selected, 3, e.Value)" /></label>
+                <span class="seg-measure">@PatFormat.Short((selected.P2 - selected.P1).Length) @doc.UnitLabel, @AngleOf(selected.P2 - selected.P1)°</span>
+                <button type="button" class="btn btn-icon" title="Excluir linha (Delete)" aria-label="Excluir linha" @onclick="State.DeleteSelected">
+                    <Icon Name="trash" />
+                </button>
+            </div>
+            @if (message is not null)
+            {
+                <p class="seg-message status-@status.ToString().ToLowerInvariant()">@message</p>
+            }
+        }
+        else
+        {
+            <p class="hint">@Hint</p>
+        }
+        <span class="coords" aria-hidden="true">
+            @if (_hover is Vec h)
+            {
+                <span>x @PatFormat.Short(h.X)</span>
+                <span>y @PatFormat.Short(h.Y)</span>
+            }
+        </span>
+    </footer>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public EditorState State { get; set; } = default!;
+
+    private const double Pad = 40;
+    private const double Extent = 640;
+    private const double HandleRadius = 11;
+    private const double HitRadius = 9;
+    private const double SnapRadius = 11;
+
+    private enum DragMode { None, P1, P2, Body }
+
+    private ElementReference _svg;
+    private DotNetObjectReference<DrawingCanvas>? _ref;
+    private IJSObjectReference? _handle;
+
+    private double _scale, _viewW, _viewH, _stepX, _stepY;
+
+    private Vec? _drawStart, _cursor, _hover, _hoverSnap;
+    private Guid? _hoverId;
+    private bool _clickToFinish;
+    private bool _ignoreNextUp;
+    private bool _erasing;
+    private DragMode _drag;
+    private bool _dragCheckpointed;
+    private Vec _grab;
+    private Segment? _dragOriginal;
+
+    private string Hint => State.Tool switch
+    {
+        DrawTool.Line when _clickToFinish => "Clique no ponto final. Esc cancela.",
+        DrawTool.Line => "Arraste para desenhar, ou clique no início e no fim. Shift trava na horizontal ou vertical.",
+        DrawTool.Select => "Clique numa linha para editar. Arraste as pontas ou a linha inteira. Delete apaga.",
+        _ => "Clique ou arraste sobre as linhas para apagar.",
+    };
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _ref = DotNetObjectReference.Create(this);
+        _handle = await JS.InvokeAsync<IJSObjectReference>("trama.attachCanvas", _svg, _ref);
+    }
+
+    // ---------- coordenadas ----------
+
+    private void ComputeLayout()
+    {
+        var d = State.Doc;
+        _scale = Extent / Math.Max(d.TileWidth, d.TileHeight);
+        _viewW = d.TileWidth * _scale + 2 * Pad;
+        _viewH = d.TileHeight * _scale + 2 * Pad;
+        var div = Math.Max(1, d.GridDivisions);
+        _stepX = d.TileWidth / div;
+        _stepY = d.TileHeight / div;
+    }
+
+    private Vec ToScreen(Vec p) => new(Pad + p.X * _scale, Pad + (State.Doc.TileHeight - p.Y) * _scale);
+
+    private Vec FromScreen(Vec s) => new((s.X - Pad) / _scale, State.Doc.TileHeight - (s.Y - Pad) / _scale);
+
+    private Vec Clamp(Vec p) => new(Math.Clamp(p.X, 0, State.Doc.TileWidth), Math.Clamp(p.Y, 0, State.Doc.TileHeight));
+
+    // ---------- eventos vindos do JavaScript ----------
+
+    [JSInvokable]
+    public void OnPointerDown(double sx, double sy, bool shift)
+    {
+        ComputeLayout();
+        if (State.Doc.IsManual) return;
+
+        var screen = new Vec(sx, sy);
+        var raw = FromScreen(screen);
+
+        switch (State.Tool)
+        {
+            case DrawTool.Line:
+                if (_clickToFinish && _drawStart is Vec a)
+                {
+                    FinishLine(a, Snap(raw, a, State.Options.Ortho || shift, null));
+                    _ignoreNextUp = true;
+                }
+                else
+                {
+                    var p = Snap(raw, null, false, null);
+                    _drawStart = p;
+                    _cursor = p;
+                }
+                break;
+
+            case DrawTool.Select:
+                var sel = State.Selected;
+                if (sel is not null && Vec.Distance(ToScreen(sel.P1), screen) <= HandleRadius)
+                {
+                    BeginDrag(DragMode.P1, sel, raw);
+                    break;
+                }
+                if (sel is not null && Vec.Distance(ToScreen(sel.P2), screen) <= HandleRadius)
+                {
+                    BeginDrag(DragMode.P2, sel, raw);
+                    break;
+                }
+                var hit = HitTest(screen);
+                State.Select(hit?.Id);
+                if (hit is not null) BeginDrag(DragMode.Body, hit, raw);
+                break;
+
+            case DrawTool.Erase:
+                _erasing = true;
+                if (HitTest(screen) is Segment target) State.DeleteSegment(target.Id);
+                break;
+        }
+
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void OnPointerMove(double sx, double sy, bool shift)
+    {
+        ComputeLayout();
+        var screen = new Vec(sx, sy);
+        var raw = FromScreen(screen);
+        var doc = State.Doc;
+        _hover = Clamp(raw);
+
+        if (doc.IsManual)
+        {
+            StateHasChanged();
+            return;
+        }
+
+        var ortho = State.Options.Ortho || shift;
+
+        if (_drawStart is Vec start)
+        {
+            _cursor = Snap(raw, start, ortho, null);
+        }
+        else if (_drag is DragMode.P1 or DragMode.P2 && State.Selected is Segment s)
+        {
+            var anchor = _drag == DragMode.P1 ? s.P2 : s.P1;
+            var p = Snap(raw, anchor, ortho, s.Id);
+            var current = _drag == DragMode.P1 ? s.P1 : s.P2;
+            if (Vec.Distance(p, anchor) > HatchMath.Eps && Vec.Distance(p, current) > 1e-12)
+            {
+                EnsureDragCheckpoint();
+                if (_drag == DragMode.P1) { s.X1 = p.X; s.Y1 = p.Y; }
+                else { s.X2 = p.X; s.Y2 = p.Y; }
+                State.Commit();
+            }
+        }
+        else if (_drag == DragMode.Body && State.Selected is Segment body && _dragOriginal is Segment o)
+        {
+            var delta = raw - _grab;
+            if (State.Options.GridSnap)
+            {
+                delta = new Vec(Math.Round(delta.X / _stepX) * _stepX, Math.Round(delta.Y / _stepY) * _stepY);
+            }
+
+            double minDx = -Math.Min(o.X1, o.X2), maxDx = doc.TileWidth - Math.Max(o.X1, o.X2);
+            double minDy = -Math.Min(o.Y1, o.Y2), maxDy = doc.TileHeight - Math.Max(o.Y1, o.Y2);
+            delta = new Vec(
+                minDx <= maxDx ? Math.Clamp(delta.X, minDx, maxDx) : 0,
+                minDy <= maxDy ? Math.Clamp(delta.Y, minDy, maxDy) : 0);
+
+            var moved = Math.Abs(body.X1 - (o.X1 + delta.X)) > 1e-12 || Math.Abs(body.Y1 - (o.Y1 + delta.Y)) > 1e-12;
+            if (moved)
+            {
+                EnsureDragCheckpoint();
+                body.X1 = o.X1 + delta.X;
+                body.Y1 = o.Y1 + delta.Y;
+                body.X2 = o.X2 + delta.X;
+                body.Y2 = o.Y2 + delta.Y;
+                State.Commit();
+            }
+        }
+        else
+        {
+            _hoverId = State.Tool is DrawTool.Select or DrawTool.Erase ? HitTest(screen)?.Id : null;
+            _hoverSnap = State.Tool == DrawTool.Line ? Snap(raw, null, false, null) : null;
+
+            if (_erasing && _hoverId is Guid id)
+            {
+                State.DeleteSegment(id);
+                _hoverId = null;
+            }
+        }
+
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void OnPointerUp(double sx, double sy, bool shift)
+    {
+        ComputeLayout();
+        _erasing = false;
+
+        if (_ignoreNextUp)
+        {
+            _ignoreNextUp = false;
+        }
+        else if (_drawStart is Vec a && !_clickToFinish)
+        {
+            var screen = new Vec(sx, sy);
+            var b = Snap(FromScreen(screen), a, State.Options.Ortho || shift, null);
+            if (Vec.Distance(ToScreen(a), ToScreen(b)) < 4)
+            {
+                // Clique simples: o próximo clique define o fim da linha.
+                _clickToFinish = true;
+            }
+            else
+            {
+                FinishLine(a, b);
+            }
+        }
+        else if (_drag is DragMode.P1 or DragMode.P2 && _dragCheckpointed && State.Options.AutoFix && State.Selected is Segment s)
+        {
+            var d = State.Doc;
+            if (_drag == DragMode.P1)
+            {
+                var p = HatchMath.FixDirection(s.P2, s.P1, d.TileWidth, d.TileHeight, d.MaxComplexity);
+                s.X1 = p.X;
+                s.Y1 = p.Y;
+            }
+            else
+            {
+                var p = HatchMath.FixDirection(s.P1, s.P2, d.TileWidth, d.TileHeight, d.MaxComplexity);
+                s.X2 = p.X;
+                s.Y2 = p.Y;
+            }
+            State.Commit();
+        }
+
+        _drag = DragMode.None;
+        _dragCheckpointed = false;
+        _dragOriginal = null;
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void OnPointerLeave()
+    {
+        _hover = null;
+        _hoverSnap = null;
+        _hoverId = null;
+        StateHasChanged();
+    }
+
+    /// <summary>Cancela uma linha em andamento (Esc).</summary>
+    public void Cancel()
+    {
+        _drawStart = null;
+        _cursor = null;
+        _clickToFinish = false;
+        _ignoreNextUp = false;
+        StateHasChanged();
+    }
+
+    // ---------- operações ----------
+
+    private void FinishLine(Vec a, Vec b)
+    {
+        var d = State.Doc;
+        if (State.Options.AutoFix) b = HatchMath.FixDirection(a, b, d.TileWidth, d.TileHeight, d.MaxComplexity);
+
+        _drawStart = null;
+        _cursor = null;
+        _clickToFinish = false;
+
+        if (Vec.Distance(a, b) > HatchMath.Eps) State.AddSegment(a, b);
+    }
+
+    private void BeginDrag(DragMode mode, Segment s, Vec raw)
+    {
+        _drag = mode;
+        _grab = raw;
+        _dragOriginal = s.Clone();
+        _dragCheckpointed = false;
+    }
+
+    private void EnsureDragCheckpoint()
+    {
+        if (_dragCheckpointed) return;
+        State.Checkpoint();
+        _dragCheckpointed = true;
+    }
+
+    private Vec Snap(Vec raw, Vec? anchor, bool ortho, Guid? exclude)
+    {
+        var p = Clamp(raw);
+        var horizontal = false;
+
+        if (ortho && anchor is Vec a0)
+        {
+            horizontal = Math.Abs(p.X - a0.X) >= Math.Abs(p.Y - a0.Y);
+            p = horizontal ? new Vec(p.X, a0.Y) : new Vec(a0.X, p.Y);
+        }
+
+        if (State.Options.LineSnap && !ortho && FindSnapPoint(p, exclude) is Vec snapped)
+        {
+            return snapped;
+        }
+
+        if (State.Options.GridSnap)
+        {
+            var gx = Math.Round(p.X / _stepX) * _stepX;
+            var gy = Math.Round(p.Y / _stepY) * _stepY;
+            if (ortho && anchor is Vec a1) p = horizontal ? new Vec(gx, a1.Y) : new Vec(a1.X, gy);
+            else p = new Vec(gx, gy);
+        }
+
+        return Clamp(p);
+    }
+
+    private Vec? FindSnapPoint(Vec p, Guid? exclude)
+    {
+        var screen = ToScreen(p);
+        Vec? best = null;
+        var bestDistance = SnapRadius;
+
+        foreach (var s in State.Doc.Segments)
+        {
+            if (s.Id == exclude) continue;
+            foreach (var candidate in new[] { s.P1, s.P2, (s.P1 + s.P2) * 0.5 })
+            {
+                var distance = Vec.Distance(ToScreen(candidate), screen);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = candidate;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private Segment? HitTest(Vec screen)
+    {
+        Segment? best = null;
+        var bestDistance = HitRadius;
+        foreach (var s in State.Doc.Segments)
+        {
+            var distance = Vec.DistanceToSegment(screen, ToScreen(s.P1), ToScreen(s.P2));
+            if (distance <= bestDistance)
+            {
+                bestDistance = distance;
+                best = s;
+            }
+        }
+        return best;
+    }
+
+    private void SetCoord(Segment s, int index, object? value)
+    {
+        var text = value?.ToString()?.Replace(',', '.');
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) || !double.IsFinite(v))
+        {
+            State.NotifyView();
+            return;
+        }
+
+        var d = State.Doc;
+        v = index % 2 == 0 ? Math.Clamp(v, 0, d.TileWidth) : Math.Clamp(v, 0, d.TileHeight);
+        State.Checkpoint();
+        switch (index)
+        {
+            case 0: s.X1 = v; break;
+            case 1: s.Y1 = v; break;
+            case 2: s.X2 = v; break;
+            default: s.Y2 = v; break;
+        }
+        State.Commit();
+    }
+
+    private void SetOption(Action<CanvasOptions> change)
+    {
+        change(State.Options);
+        State.NotifyView();
+    }
+
+    private async Task ReturnToDrawingAsync()
+    {
+        if (!await JS.InvokeAsync<bool>("confirm",
+                "Voltar ao desenho descarta as edições feitas no texto e usa as linhas do quadro. Continuar?"))
+            return;
+        State.ExitManualMode();
+    }
+
+    // ---------- apresentação ----------
+
+    private string SegClass(Segment s)
+    {
+        var classes = new List<string>();
+        if (s.Id == State.SelectedId) classes.Add("is-selected");
+        if (s.Id == _hoverId) classes.Add(State.Tool == DrawTool.Erase ? "is-erase-target" : "is-hover");
+        var (status, _) = State.Generated.StatusFor(s.Id);
+        if (status == LineStatus.Warning) classes.Add("is-warning");
+        if (status == LineStatus.Error) classes.Add("is-error");
+        return string.Join(' ', classes);
+    }
+
+    private string ToolClass(DrawTool tool) => State.Tool == tool ? "is-active" : "";
+
+    private string Pressed(DrawTool tool) => State.Tool == tool ? "true" : "false";
+
+    private static bool IsMajor(int i, int divisions)
+    {
+        var step = divisions % 4 == 0 ? divisions / 4
+            : divisions % 3 == 0 ? divisions / 3
+            : divisions % 2 == 0 ? divisions / 2
+            : divisions;
+        return step > 1 && i % step == 0;
+    }
+
+    private static string AngleOf(Vec d)
+    {
+        var angle = Math.Atan2(d.Y, d.X) * 180 / Math.PI;
+        if (angle < 0) angle += 360;
+        return PatFormat.Decimals(angle, 2);
+    }
+
+    private static string N(double v) => PatFormat.Decimals(v, 2);
+
+    public async ValueTask DisposeAsync()
+    {
+        State.Changed -= OnChanged;
+        if (_handle is not null)
+        {
+            try
+            {
+                await _handle.InvokeVoidAsync("dispose");
+                await _handle.DisposeAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+        _ref?.Dispose();
+    }
+}

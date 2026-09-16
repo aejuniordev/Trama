@@ -1,0 +1,327 @@
+@page "/"
+@page "/projeto/{Id:int}"
+@implements IAsyncDisposable
+@inject ProjectRepository Repo
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>@State.Doc.Name – Trama</PageTitle>
+
+<NavigationLock ConfirmExternalNavigation="State.IsDirty" OnBeforeInternalNavigation="OnBeforeInternalNavigation" />
+
+<div class="app">
+    <ProjectSidebar State="State"
+                    ProjectsVersion="_projectsVersion"
+                    OnOpenProject="OpenProjectAsync"
+                    OnDeleteProject="DeleteProjectAsync"
+                    OnDuplicateProject="DuplicateProjectAsync" />
+
+    <main class="main">
+        <header class="topbar">
+            <div class="topbar-actions">
+                <button type="button" class="btn" @onclick="NewProjectAsync">
+                    <Icon Name="new" /> Novo
+                </button>
+                <button type="button" class="btn btn-primary" @onclick="SaveAsync" disabled="@_saving" title="Salvar (Ctrl+S)">
+                    <Icon Name="save" /> Salvar
+                </button>
+                <label class="btn" title="Abrir um arquivo .pat existente">
+                    <Icon Name="upload" /> Importar .pat
+                    <InputFile OnChange="ImportAsync" accept=".pat,.txt" class="visually-hidden" />
+                </label>
+
+                <span class="topbar-sep" aria-hidden="true"></span>
+
+                <button type="button" class="btn btn-icon" title="Desfazer (Ctrl+Z)" aria-label="Desfazer"
+                        @onclick="State.Undo" disabled="@(!State.CanUndo)">
+                    <Icon Name="undo" />
+                </button>
+                <button type="button" class="btn btn-icon" title="Refazer (Ctrl+Y)" aria-label="Refazer"
+                        @onclick="State.Redo" disabled="@(!State.CanRedo)">
+                    <Icon Name="redo" />
+                </button>
+                <button type="button" class="btn" @onclick="ClearAsync"
+                        disabled="@(State.Doc.Segments.Count == 0 || State.Doc.IsManual)">
+                    <Icon Name="clear" /> Limpar quadro
+                </button>
+            </div>
+
+            <div class="topbar-status" role="status" aria-live="polite">
+                @if (_flash is not null)
+                {
+                    <span class="flash flash-@_flashKind">@_flash</span>
+                }
+                else if (State.IsDirty)
+                {
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span>Alterações não salvas</span>
+                }
+                else if (State.SavedAt is DateTime saved)
+                {
+                    <span>Salvo às @saved.ToLocalTime().ToString("HH:mm")</span>
+                }
+                else
+                {
+                    <span>Projeto novo</span>
+                }
+            </div>
+        </header>
+
+        <div class="workspace">
+            <DrawingCanvas @ref="_canvas" State="State" />
+            <div class="stack">
+                <PatTextPanel State="State" />
+                <PatPreview State="State" />
+            </div>
+        </div>
+    </main>
+</div>
+
+@code {
+    [Parameter] public int? Id { get; set; }
+
+    private readonly EditorState State = new();
+    private DrawingCanvas? _canvas;
+    private DotNetObjectReference<Home>? _ref;
+    private IJSObjectReference? _keys;
+    private int _projectsVersion;
+    private bool _saving;
+    private bool _skipNavigationPrompt;
+    private string? _flash;
+    private string _flashKind = "ok";
+    private CancellationTokenSource? _flashCts;
+
+    protected override void OnInitialized() => State.Changed += OnStateChanged;
+
+    private void OnStateChanged() => InvokeAsync(StateHasChanged);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Id is int id)
+        {
+            if (State.ProjectId == id) return;
+
+            var project = await Repo.GetAsync(id);
+            if (project is null)
+            {
+                State.Load(new PatternDocument(), null, null);
+                Flash("Esse projeto não existe mais. Um projeto novo foi aberto.", "error");
+                return;
+            }
+
+            State.Load(ProjectMapper.ToDocument(project), project.Id, project.UpdatedAt);
+        }
+        else if (State.ProjectId is not null)
+        {
+            State.Load(new PatternDocument(), null, null);
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _ref = DotNetObjectReference.Create(this);
+        _keys = await JS.InvokeAsync<IJSObjectReference>("trama.attachKeys", _ref);
+    }
+
+    [JSInvokable]
+    public async Task OnShortcut(string action)
+    {
+        switch (action)
+        {
+            case "save": await SaveAsync(); break;
+            case "undo": State.Undo(); break;
+            case "redo": State.Redo(); break;
+            case "delete": State.DeleteSelected(); break;
+            case "escape":
+                _canvas?.Cancel();
+                State.Select(null);
+                break;
+            case "tool-select": State.SetTool(DrawTool.Select); break;
+            case "tool-line": State.SetTool(DrawTool.Line); break;
+            case "tool-erase": State.SetTool(DrawTool.Erase); break;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving) return;
+        _saving = true;
+        try
+        {
+            var entity = ProjectMapper.ToEntity(State.Doc, State.ProjectId ?? 0, State.CurrentPatText);
+            var saved = await Repo.SaveAsync(entity);
+            State.MarkSaved(saved.Id, saved.UpdatedAt);
+            _projectsVersion++;
+            Flash("Projeto salvo.");
+            if (Id != saved.Id) Nav.NavigateTo($"/projeto/{saved.Id}", replace: true);
+        }
+        catch (Exception ex)
+        {
+            Flash($"Não foi possível salvar: {ex.Message}", "error");
+        }
+        finally
+        {
+            _saving = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task NewProjectAsync()
+    {
+        if (State.IsDirty && !await ConfirmAsync("Descartar as alterações não salvas e começar um projeto novo?")) return;
+        State.Load(new PatternDocument(), null, null);
+        if (Id is not null) Nav.NavigateTo("/");
+    }
+
+    private Task OpenProjectAsync(int id)
+    {
+        if (id != State.ProjectId) Nav.NavigateTo($"/projeto/{id}");
+        return Task.CompletedTask;
+    }
+
+    private async Task DeleteProjectAsync(int id)
+    {
+        await Repo.DeleteAsync(id);
+        _projectsVersion++;
+        if (id == State.ProjectId)
+        {
+            State.Detach();
+            Flash("Projeto excluído. O desenho continua aberto; salve para recriá-lo.");
+            _skipNavigationPrompt = true;
+            Nav.NavigateTo("/", replace: true);
+        }
+        else
+        {
+            Flash("Projeto excluído.");
+        }
+    }
+
+    private async Task DuplicateProjectAsync(int id)
+    {
+        var copy = await Repo.DuplicateAsync(id);
+        _projectsVersion++;
+        if (copy is not null)
+        {
+            Flash($"Cópia criada: {copy.Name}");
+            await OpenProjectAsync(copy.Id);
+        }
+    }
+
+    private async Task ImportAsync(InputFileChangeEventArgs e)
+    {
+        const long limit = 1_000_000;
+        var file = e.File;
+        if (file.Size > limit)
+        {
+            Flash("Arquivo grande demais. O limite é 1 MB.", "error");
+            return;
+        }
+
+        string text;
+        using (var reader = new StreamReader(file.OpenReadStream(limit)))
+        {
+            text = await reader.ReadToEndAsync();
+        }
+
+        if (State.IsDirty && !await ConfirmAsync("Descartar as alterações não salvas e abrir o arquivo importado?")) return;
+
+        var parsed = PatParser.Parse(text);
+        var mm = parsed.Units == PatUnits.Millimeters;
+        var doc = new PatternDocument
+        {
+            Name = string.IsNullOrWhiteSpace(parsed.Name) ? Path.GetFileNameWithoutExtension(file.Name) : parsed.Name,
+            Description = parsed.Description ?? "",
+            Target = parsed.HasRevitHeaders ? TargetApp.Revit : TargetApp.AutoCad,
+            Units = parsed.Units ?? PatUnits.Inches,
+            Kind = parsed.Kind ?? PatternKind.Model,
+            TileWidth = mm ? 300 : 12,
+            TileHeight = mm ? 300 : 12,
+            IsManual = true,
+            ManualText = text,
+        };
+
+        State.Load(doc, null, null);
+        State.MarkDirty();
+
+        if (Id is not null)
+        {
+            _skipNavigationPrompt = true;
+            Nav.NavigateTo("/");
+        }
+
+        Flash(parsed.Lines.Count > 0
+            ? $"{parsed.Lines.Count} linhas importadas. O arquivo abre como texto editável."
+            : "Arquivo aberto, mas nenhuma linha válida foi encontrada.", parsed.Lines.Count > 0 ? "ok" : "error");
+    }
+
+    private async Task ClearAsync()
+    {
+        if (!await ConfirmAsync("Apagar todas as linhas do quadro? Dá para desfazer com Ctrl+Z.")) return;
+        State.ClearSegments();
+    }
+
+    private async Task OnBeforeInternalNavigation(LocationChangingContext context)
+    {
+        if (_skipNavigationPrompt)
+        {
+            _skipNavigationPrompt = false;
+            return;
+        }
+
+        if (State.IsDirty && !await ConfirmAsync("Há alterações não salvas. Sair deste projeto mesmo assim?"))
+        {
+            context.PreventNavigation();
+        }
+    }
+
+    private async Task<bool> ConfirmAsync(string message)
+    {
+        try
+        {
+            return await JS.InvokeAsync<bool>("confirm", message);
+        }
+        catch (JSDisconnectedException)
+        {
+            return false;
+        }
+    }
+
+    private void Flash(string message, string kind = "ok")
+    {
+        _flashCts?.Cancel();
+        _flashCts = new CancellationTokenSource();
+        var token = _flashCts.Token;
+        _flash = message;
+        _flashKind = kind;
+        StateHasChanged();
+
+        _ = Task.Delay(kind == "error" ? 6000 : 3000, token).ContinueWith(t =>
+        {
+            if (t.IsCanceled) return;
+            _ = InvokeAsync(() =>
+            {
+                _flash = null;
+                StateHasChanged();
+            });
+        }, TaskScheduler.Default);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        State.Changed -= OnStateChanged;
+        _flashCts?.Cancel();
+        if (_keys is not null)
+        {
+            try
+            {
+                await _keys.InvokeVoidAsync("dispose");
+                await _keys.DisposeAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+        }
+        _ref?.Dispose();
+    }
+}

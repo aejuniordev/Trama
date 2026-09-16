@@ -1,0 +1,168 @@
+@implements IDisposable
+@inject IJSRuntime JS
+
+@{
+    var doc = State.Doc;
+}
+
+<section class="panel text-panel" aria-label="Arquivo .PAT">
+    <header class="panel-head">
+        <h2 class="panel-title">Arquivo .PAT</h2>
+        <span class="panel-summary">@Summary()</span>
+        <div class="panel-actions">
+            <button type="button" class="btn btn-small" @onclick="CopyAsync">
+                <Icon Name="copy" /> @(_copied ? "Copiado" : "Copiar")
+            </button>
+            <button type="button" class="btn btn-small" @onclick="DownloadAsync">
+                <Icon Name="download" /> Baixar
+            </button>
+            @if (!doc.IsManual)
+            {
+                <button type="button" class="btn btn-small" @onclick="State.EnterManualMode"
+                        title="Transforma o resultado em texto editável. O desenho deixa de alterar o arquivo.">
+                    <Icon Name="pencil" /> Editar texto
+                </button>
+            }
+        </div>
+    </header>
+
+    <div class="panel-body code-body">
+        @if (!doc.IsManual)
+        {
+            <div class="code" role="list">
+                @for (var i = 0; i < State.Generated.Lines.Count; i++)
+                {
+                    var line = State.Generated.Lines[i];
+                    var number = i + 1;
+                    var selected = line.SegmentId is not null && line.SegmentId == State.SelectedId;
+                    <div role="listitem"
+                         class="code-line @StatusClass(line.Status) @(selected ? "is-selected" : "") @(line.SegmentId is not null ? "is-clickable" : "")"
+                         @onclick="() => SelectLine(line)">
+                        <span class="code-mark">@if (line.Status is LineStatus s) { <Icon Name="@IconFor(s)" /> }</span>
+                        <span class="code-num">@number</span>
+                        <code class="code-text @(line.Text.StartsWith(';') ? "is-comment" : line.Text.StartsWith('*') ? "is-header" : "")">@line.Text</code>
+                    </div>
+                    @if (line.Message is not null && line.Status is LineStatus.Warning or LineStatus.Error)
+                    {
+                        <div class="code-note @StatusClass(line.Status)">@line.Message</div>
+                    }
+                }
+            </div>
+        }
+        else
+        {
+            <textarea @key="State.ManualSeedVersion" class="code-editor" spellcheck="false" wrap="off"
+                      aria-label="Texto do arquivo .PAT"
+                      value="@SeedText()" @oninput="OnManualInput"></textarea>
+
+            @if (State.Parsed is ParseResult parsed)
+            {
+                var problems = parsed.Marks.Where(m => m.Value.Status != LineStatus.Ok).ToList();
+                if (problems.Count > 0 || parsed.Issues.Count > 0)
+                {
+                    <ul class="issues">
+                        @foreach (var issue in parsed.Issues)
+                        {
+                            <li class="status-error"><Icon Name="error" /> @issue</li>
+                        }
+                        @foreach (var (lineNumber, mark) in problems)
+                        {
+                            <li class="@StatusClass(mark.Status)"><Icon Name="@IconFor(mark.Status)" /> Linha @lineNumber: @mark.Message</li>
+                        }
+                    </ul>
+                }
+                else
+                {
+                    <p class="issues-ok"><Icon Name="ok" /> @parsed.Lines.Count linhas válidas.</p>
+                }
+            }
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public EditorState State { get; set; } = default!;
+
+    private bool _copied;
+    private int _seedVersion = -1;
+    private string _seed = "";
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    /// <summary>
+    /// O textarea só recebe o valor do servidor quando o texto é trocado por fora
+    /// (importação, "Editar texto"). Assim a digitação não é sobrescrita por respostas atrasadas.
+    /// </summary>
+    private string SeedText()
+    {
+        if (_seedVersion != State.ManualSeedVersion)
+        {
+            _seedVersion = State.ManualSeedVersion;
+            _seed = State.Doc.ManualText;
+        }
+        return _seed;
+    }
+
+    private void OnManualInput(ChangeEventArgs e) => State.SetManualText(e.Value?.ToString() ?? "");
+
+    private string Summary()
+    {
+        if (State.Doc.IsManual)
+        {
+            var parsed = State.Parsed;
+            if (parsed is null) return "";
+            var errors = parsed.Marks.Count(m => m.Value.Status == LineStatus.Error) + parsed.Issues.Count;
+            return errors > 0 ? $"Texto editável, {Plural(errors, "problema", "problemas")}" : "Texto editável";
+        }
+
+        var g = State.Generated;
+        var parts = new List<string> { Plural(g.Families.Count, "linha", "linhas") };
+        if (g.Warnings > 0) parts.Add(Plural(g.Warnings, "aviso", "avisos"));
+        if (g.Errors > 0) parts.Add(Plural(g.Errors, "erro", "erros"));
+        return string.Join(", ", parts);
+    }
+
+    private void SelectLine(TextLine line)
+    {
+        if (line.SegmentId is Guid id) State.Select(id);
+    }
+
+    private async Task CopyAsync()
+    {
+        _copied = await JS.InvokeAsync<bool>("trama.copyText", State.CurrentPatText);
+        StateHasChanged();
+        if (_copied)
+        {
+            await Task.Delay(1800);
+            _copied = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadAsync()
+    {
+        var text = State.CurrentPatText.Replace("\r\n", "\n").Replace("\n", "\r\n");
+        await JS.InvokeVoidAsync("trama.downloadText", PatFormat.FileName(State.Doc.Name), text);
+    }
+
+    private static string StatusClass(LineStatus? status) => status switch
+    {
+        LineStatus.Ok => "status-ok",
+        LineStatus.Warning => "status-warning",
+        LineStatus.Error => "status-error",
+        _ => "",
+    };
+
+    private static string IconFor(LineStatus status) => status switch
+    {
+        LineStatus.Ok => "ok",
+        LineStatus.Warning => "warn",
+        _ => "error",
+    };
+
+    private static string Plural(int n, string one, string many) => $"{n} {(n == 1 ? one : many)}";
+
+    public void Dispose() => State.Changed -= OnChanged;
+}

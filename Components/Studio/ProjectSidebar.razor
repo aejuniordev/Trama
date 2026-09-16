@@ -1,0 +1,242 @@
+@implements IDisposable
+@inject ProjectRepository Repo
+@inject IJSRuntime JS
+
+@{
+    var doc = State.Doc;
+}
+
+<aside class="sidebar">
+    <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="29" height="29" rx="3" />
+            <path d="M1.5 12.5l11-11M1.5 22.5l21-21M7.5 30.5l23-23M17.5 30.5l13-13" />
+        </svg>
+        <div>
+            <div class="brand-name">Trama</div>
+            <div class="brand-sub">Editor de hachuras .pat</div>
+        </div>
+    </div>
+
+    <section class="side-section">
+        <label class="field">
+            <span class="field-label">Nome do padrão</span>
+            <input type="text" value="@doc.Name" maxlength="80" spellcheck="false"
+                   @onchange="e => State.SetName(e.Value?.ToString())" />
+        </label>
+        <label class="field">
+            <span class="field-label">Descrição</span>
+            <textarea rows="2" maxlength="200" placeholder="Para que serve este padrão?"
+                      value="@doc.Description"
+                      @onchange="e => State.SetDescription(e.Value?.ToString())"></textarea>
+        </label>
+
+        <div class="field">
+            <span class="field-label" id="lbl-target">Programa</span>
+            <div class="segmented" role="group" aria-labelledby="lbl-target">
+                <button type="button" class="@On(doc.Target == TargetApp.Revit)" @onclick="() => State.SetTarget(TargetApp.Revit)">Revit</button>
+                <button type="button" class="@On(doc.Target == TargetApp.AutoCad)" @onclick="() => State.SetTarget(TargetApp.AutoCad)">AutoCAD</button>
+            </div>
+        </div>
+
+        <div class="field">
+            <span class="field-label" id="lbl-units">Unidade</span>
+            <div class="segmented" role="group" aria-labelledby="lbl-units">
+                <button type="button" class="@On(doc.Units == PatUnits.Inches)" @onclick="() => State.SetUnits(PatUnits.Inches)">Polegadas</button>
+                <button type="button" class="@On(doc.Units == PatUnits.Millimeters)" @onclick="() => State.SetUnits(PatUnits.Millimeters)">Milímetros</button>
+            </div>
+        </div>
+
+        <div class="field">
+            <span class="field-label" id="lbl-kind">Tipo no Revit</span>
+            <div class="segmented" role="group" aria-labelledby="lbl-kind">
+                <button type="button" class="@On(doc.Kind == PatternKind.Model)" disabled="@(doc.Target != TargetApp.Revit)"
+                        title="Escala com o modelo (revestimentos, pisos)" @onclick="() => State.SetKind(PatternKind.Model)">Modelo</button>
+                <button type="button" class="@On(doc.Kind == PatternKind.Drafting)" disabled="@(doc.Target != TargetApp.Revit)"
+                        title="Mantém o tamanho na folha impressa (símbolos, cortes)" @onclick="() => State.SetKind(PatternKind.Drafting)">Desenho</button>
+            </div>
+        </div>
+    </section>
+
+    <section class="side-section">
+        <h3 class="side-title">Quadro de repetição</h3>
+        <div class="field-row">
+            <label class="field">
+                <span class="field-label">Largura (@doc.UnitLabel)</span>
+                <input type="number" step="any" min="0" inputmode="decimal" value="@N(doc.TileWidth)"
+                       @onchange="e => SetTile(e.Value, true)" />
+            </label>
+            <label class="field">
+                <span class="field-label">Altura (@doc.UnitLabel)</span>
+                <input type="number" step="any" min="0" inputmode="decimal" value="@N(doc.TileHeight)"
+                       @onchange="e => SetTile(e.Value, false)" />
+            </label>
+        </div>
+        <div class="field-row">
+            <label class="field">
+                <span class="field-label">Divisões da grade</span>
+                <input type="number" min="1" max="200" step="1" value="@doc.GridDivisions"
+                       @onchange="e => { if (int.TryParse(e.Value?.ToString(), out var n)) State.SetGridDivisions(n); }" />
+            </label>
+            <label class="field" title="Quantos quadros uma linha inclinada pode cruzar antes de se repetir. Valores altos aceitam ângulos quebrados, mas geram linhas muito próximas.">
+                <span class="field-label">Complexidade máx.</span>
+                <input type="number" min="1" max="200" step="1" value="@doc.MaxComplexity"
+                       @onchange="e => { if (int.TryParse(e.Value?.ToString(), out var n)) State.SetMaxComplexity(n); }" />
+            </label>
+        </div>
+        <p class="side-note">Mudar o tamanho do quadro escala as linhas junto.</p>
+    </section>
+
+    <details class="side-section templates" open>
+        <summary class="side-title">Modelos prontos</summary>
+        <div class="template-grid">
+            @foreach (var template in PatternTemplates.All)
+            {
+                var t = template;
+                <button type="button" class="template" title="@t.Description" disabled="@doc.IsManual" @onclick="() => ApplyTemplateAsync(t)">
+                    <svg viewBox="0 0 40 40" aria-hidden="true">
+                        @for (var tx = 0; tx < 2; tx++)
+                        {
+                            for (var ty = 0; ty < 2; ty++)
+                            {
+                                foreach (var l in t.Lines)
+                                {
+                                    <line x1="@N(tx * 20 + l[0] / t.Grid * 20)" y1="@N(40 - (ty * 20 + l[1] / t.Grid * 20))"
+                                          x2="@N(tx * 20 + l[2] / t.Grid * 20)" y2="@N(40 - (ty * 20 + l[3] / t.Grid * 20))" />
+                                }
+                            }
+                        }
+                    </svg>
+                    <span>@t.Name</span>
+                </button>
+            }
+        </div>
+    </details>
+
+    <section class="side-section projects">
+        <div class="projects-head">
+            <h3 class="side-title">Meus projetos</h3>
+            <span class="count">@_projects.Count</span>
+        </div>
+        <input type="search" class="search" placeholder="Buscar pelo nome" aria-label="Buscar projetos"
+               value="@_search" @oninput="OnSearchAsync" />
+
+        @if (_error is not null)
+        {
+            <p class="side-empty is-error">@_error</p>
+        }
+        else if (_projects.Count == 0)
+        {
+            <p class="side-empty">
+                @(string.IsNullOrWhiteSpace(_search)
+                    ? "Nenhum projeto salvo ainda. Desenhe um padrão e clique em Salvar."
+                    : "Nenhum projeto com esse nome.")
+            </p>
+        }
+        else
+        {
+            <ul class="project-list">
+                @foreach (var project in _projects)
+                {
+                    var p = project;
+                    <li class="project @(p.Id == State.ProjectId ? "is-current" : "")">
+                        <button type="button" class="project-open" @onclick="() => OnOpenProject.InvokeAsync(p.Id)">
+                            <span class="project-name">@p.Name</span>
+                            <span class="project-meta">
+                                <span>@(p.Target == TargetApp.Revit ? "Revit" : "AutoCAD")</span>
+                                <span>@(p.Units == PatUnits.Millimeters ? "mm" : "pol")</span>
+                                <span>@(p.IsManual ? "texto" : $"{p.SegmentCount} {(p.SegmentCount == 1 ? "linha" : "linhas")}")</span>
+                            </span>
+                            <span class="project-date">@p.UpdatedAt.ToLocalTime().ToString("dd/MM/yyyy HH:mm")</span>
+                        </button>
+                        <div class="project-actions">
+                            <button type="button" class="btn-ghost" title="Duplicar" aria-label="Duplicar @p.Name"
+                                    @onclick="() => OnDuplicateProject.InvokeAsync(p.Id)">
+                                <Icon Name="copy" />
+                            </button>
+                            <button type="button" class="btn-ghost danger" title="Excluir" aria-label="Excluir @p.Name"
+                                    @onclick="() => DeleteAsync(p)">
+                                <Icon Name="trash" />
+                            </button>
+                        </div>
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+</aside>
+
+@code {
+    [Parameter, EditorRequired] public EditorState State { get; set; } = default!;
+    [Parameter] public int ProjectsVersion { get; set; }
+    [Parameter] public EventCallback<int> OnOpenProject { get; set; }
+    [Parameter] public EventCallback<int> OnDeleteProject { get; set; }
+    [Parameter] public EventCallback<int> OnDuplicateProject { get; set; }
+
+    private List<ProjectSummary> _projects = new();
+    private string _search = "";
+    private string? _error;
+    private int _loadedVersion = -1;
+
+    protected override void OnInitialized() => State.Changed += OnStateChanged;
+
+    private void OnStateChanged() => InvokeAsync(StateHasChanged);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedVersion == ProjectsVersion) return;
+        _loadedVersion = ProjectsVersion;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _projects = await Repo.ListAsync(_search);
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Não foi possível ler o banco de dados: {ex.Message}";
+        }
+    }
+
+    private async Task OnSearchAsync(ChangeEventArgs e)
+    {
+        _search = e.Value?.ToString() ?? "";
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(ProjectSummary p)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"Excluir o projeto \"{p.Name}\"? Essa ação não pode ser desfeita.")) return;
+        await OnDeleteProject.InvokeAsync(p.Id);
+    }
+
+    private async Task ApplyTemplateAsync(PatternTemplate t)
+    {
+        if (State.Doc.Segments.Count > 0 &&
+            !await JS.InvokeAsync<bool>("confirm", $"Substituir as linhas atuais pelo modelo \"{t.Name}\"? Dá para desfazer com Ctrl+Z."))
+            return;
+        State.ApplyTemplate(t);
+    }
+
+    private void SetTile(object? value, bool width)
+    {
+        var text = value?.ToString()?.Replace(',', '.');
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) || v <= 0)
+        {
+            State.NotifyView();
+            return;
+        }
+        if (width) State.SetTileSize(v, State.Doc.TileHeight);
+        else State.SetTileSize(State.Doc.TileWidth, v);
+    }
+
+    private static string On(bool active) => active ? "is-active" : "";
+
+    private static string N(double v) => PatFormat.Decimals(v, 4);
+
+    public void Dispose() => State.Changed -= OnStateChanged;
+}
